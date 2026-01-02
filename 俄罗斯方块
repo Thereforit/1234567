@@ -1,0 +1,714 @@
+import pygame
+import random
+import sys
+
+# -------------------------- 常量定义 --------------------------
+# 颜色配置（简约柔和+支持方块立体感）
+BLACK = (10, 10, 10)  # 深灰黑，背景色更柔和
+WHITE = (240, 240, 240)  # 浅白
+GRAY = (80, 80, 80)  # 暗灰色，网格线颜色（不刺眼）
+LIGHT_GRAY = (150, 150, 150)  # 浅灰色，提示文字颜色
+DARK_GRAY = (50, 50, 50)  # 深灰色，预览区域背景
+LIGHT_HIGHLIGHT = (255, 255, 255, 60)  # 方块高光色（半透明）
+DARK_SHADOW = (0, 0, 0, 100)  # 方块阴影色（半透明）
+
+# 方块基础颜色（柔和色调）
+RED = (220, 0, 0)
+GREEN = (0, 200, 0)
+BLUE = (0, 0, 220)
+YELLOW = (220, 220, 0)
+CYAN = (0, 200, 200)
+MAGENTA = (200, 0, 200)
+ORANGE = (220, 140, 0)
+
+# 方块形状定义（I/O/T/L/J/S/Z）
+SHAPES = [
+    [[1, 1, 1, 1]],  # I
+    [[1, 1], [1, 1]],  # O
+    [[0, 1, 0], [1, 1, 1]],  # T
+    [[0, 0, 1], [1, 1, 1]],  # L
+    [[1, 0, 0], [1, 1, 1]],  # J
+    [[0, 1, 1], [1, 1, 0]],  # S
+    [[1, 1, 0], [0, 1, 1]]   # Z
+]
+
+# 方块颜色对应
+SHAPE_COLORS = [CYAN, YELLOW, MAGENTA, ORANGE, BLUE, GREEN, RED]
+
+# 难度配置（纵向网格数 > 横向网格数）
+DIFFICULTY = {
+    "简单": (9, 18),   # 横9 < 纵18
+    "普通": (12, 24),  # 横12 < 纵24
+    "困难": (15, 30)   # 横15 < 纵30
+}
+
+# 按键配置
+ROTATE_COOLDOWN = 5  # 旋转冷却帧数
+MOVE_CLICK_COOLDOWN = 8  # 单击移动冷却
+# 长按平移配置
+HOLD_MOVE_DELAY = 15  # 长按触发延迟（≈250ms）
+HOLD_MOVE_INTERVAL = 8  # 长按平移间隔
+# 长按下键配置
+DOWN_HOLD_INTERVAL = 3  # 长按下键下落间隔（加速效果）
+
+# 等级与得分配置
+MAX_LEVEL = 10  # 最大等级
+LEVEL_UP_SCORE = 100  # 每100分升级
+FIXED_LINE_SCORE = 20  # 所有模式消除一行固定得分20分
+
+# -------------------------- 游戏核心类 --------------------------
+class TetrisGame:
+    def __init__(self, difficulty="普通"):
+        # 初始化难度对应的网格尺寸
+        self.grid_width, self.grid_height = DIFFICULTY[difficulty]
+        self.difficulty = difficulty
+        # 不同难度对应方块尺寸
+        if difficulty == "简单":
+            self.block_size = 35
+            self.preview_block_size = 25
+        else:
+            self.block_size = 20
+            self.preview_block_size = 15
+
+        # 窗口尺寸计算
+        self.side_width = 200
+        self.window_width = self.grid_width * self.block_size + self.side_width
+        self.window_height = self.grid_height * self.block_size
+        # 简单模式窗口高度兜底
+        if difficulty == "简单" and self.window_height < 650:
+            self.window_height = 650
+        self.screen = pygame.display.set_mode((self.window_width, self.window_height))
+        pygame.display.set_caption(f"俄罗斯方块 - {difficulty}模式")
+
+        # 游戏状态
+        self.game_loop_running = True
+        self.game_updating = True
+        self.game_paused = False
+        self.game_over = False
+        self.score = 0
+        # 等级系统
+        self.level = 1
+        self.base_drop_interval = {
+            "简单": 50,
+            "普通": 35,
+            "困难": 20
+        }[difficulty]
+        self.drop_interval = self.base_drop_interval  # 实际下落间隔（随等级变化）
+
+        # 初始化网格
+        self.grid = [[0 for _ in range(self.grid_width)] for _ in range(self.grid_height)]
+
+        # 当前方块信息
+        self.current_shape = None
+        self.current_color = None
+        self.current_x = 0
+        self.current_y = 0
+
+        # 下一个方块信息
+        self.next_shape = None
+        self.next_color = None
+
+        # 按键冷却状态
+        self.rotate_cooldown_counter = 0
+        self.left_cooldown_counter = 0
+        self.right_cooldown_counter = 0
+        self.down_cooldown_counter = 0
+
+        # 长按核心变量
+        self.left_held = False
+        self.right_held = False
+        self.down_held = False
+        self.left_hold_timer = 0
+        self.right_hold_timer = 0
+        self.down_hold_timer = 0
+
+        # 下落计时器
+        self.drop_timer = 0
+
+        # 初始化方块
+        self.spawn_new_shape()
+        self.generate_next_shape()
+
+    def generate_next_shape(self):
+        """生成下一个方块"""
+        shape_idx = random.randint(0, len(SHAPES)-1)
+        self.next_shape = SHAPES[shape_idx]
+        self.next_color = SHAPE_COLORS[shape_idx]
+
+    def spawn_new_shape(self):
+        """生成新的当前方块"""
+        # 继承下一个方块
+        if self.next_shape is not None and self.next_color is not None:
+            self.current_shape = self.next_shape
+            self.current_color = self.next_color
+            self.generate_next_shape()
+        else:
+            shape_idx = random.randint(0, len(SHAPES)-1)
+            self.current_shape = SHAPES[shape_idx]
+            self.current_color = SHAPE_COLORS[shape_idx]
+
+        # 初始位置（水平居中）
+        self.current_x = self.grid_width // 2 - len(self.current_shape[0]) // 2
+        self.current_y = 0
+        self.drop_timer = 0
+
+        # 检查游戏结束
+        if self.check_collision(0, 0):
+            self.game_over = True
+            self.game_updating = False
+
+    def check_collision(self, dx, dy):
+        """检查方块移动/旋转后是否碰撞"""
+        for y, row in enumerate(self.current_shape):
+            for x, cell in enumerate(row):
+                if cell:
+                    new_x = self.current_x + x + dx
+                    new_y = self.current_y + y + dy
+                    # 边界碰撞
+                    if new_x < 0 or new_x >= self.grid_width or new_y >= self.grid_height:
+                        return True
+                    # 已有方块碰撞
+                    if new_y >= 0 and self.grid[new_y][new_x] != 0:
+                        return True
+        return False
+
+    def rotate_shape(self):
+        """旋转方块"""
+        if not self.game_updating:
+            return False
+        rotated = list(zip(*self.current_shape[::-1]))
+        rotated = [list(row) for row in rotated]
+
+        # 碰撞检测
+        original_shape = self.current_shape
+        self.current_shape = rotated
+        if self.check_collision(0, 0):
+            self.current_shape = original_shape
+            return False
+        return True
+
+    def lock_shape(self):
+        """锁定方块到网格中"""
+        for y, row in enumerate(self.current_shape):
+            for x, cell in enumerate(row):
+                if cell:
+                    grid_y = self.current_y + y
+                    grid_x = self.current_x + x
+                    if grid_y >= 0:
+                        self.grid[grid_y][grid_x] = SHAPE_COLORS.index(self.current_color) + 1
+
+        # 消除满行并更新分数
+        self.clear_full_lines()
+        # 生成新方块
+        self.spawn_new_shape()
+
+    def clear_full_lines(self):
+        """消除满行，固定每行20分，同时处理等级提升"""
+        new_grid = []
+        lines_cleared = 0
+
+        # 筛选非满行
+        for row in self.grid:
+            if all(cell != 0 for cell in row):
+                lines_cleared += 1
+                continue
+            new_grid.append(row)
+
+        # 补充空行到顶部
+        while len(new_grid) < self.grid_height:
+            new_grid.insert(0, [0 for _ in range(self.grid_width)])
+
+        self.grid = new_grid
+        # 固定得分：消除几行 × 20分（所有模式统一）
+        self.score += lines_cleared * FIXED_LINE_SCORE
+
+        # 等级提升逻辑
+        self.update_level()
+
+    def update_level(self):
+        """更新等级，每100分升级，几级对应几倍速（核心最小修改）"""
+        # 计算当前应有的等级
+        new_level = min((self.score // LEVEL_UP_SCORE) + 1, MAX_LEVEL)
+        # 仅等级提升时更新速度
+        if new_level > self.level:
+            self.level = new_level
+            # 核心修改：直接用当前等级作为倍速，计算下落间隔
+            # 下落间隔 = 基础间隔 / 当前等级（实现几级几倍速，如1级1倍、2级2倍...）
+            self.drop_interval = max(2, self.base_drop_interval / self.level)
+
+    def draw_3d_block(self, x, y, color, block_size):
+        """绘制带立体感的方块"""
+        # 1. 绘制阴影
+        shadow_offset = 2
+        shadow_rect = pygame.Rect(
+            x + shadow_offset,
+            y + shadow_offset,
+            block_size - 2,
+            block_size - 2
+        )
+        shadow_surface = pygame.Surface((block_size - 2, block_size - 2), pygame.SRCALPHA)
+        shadow_surface.fill(DARK_SHADOW)
+        self.screen.blit(shadow_surface, shadow_rect.topleft)
+
+        # 2. 绘制主体
+        main_rect = pygame.Rect(
+            x,
+            y,
+            block_size - 2,
+            block_size - 2
+        )
+        pygame.draw.rect(self.screen, color, main_rect)
+
+        # 3. 绘制高光
+        highlight_width = block_size // 4
+        highlight_height = block_size // 4
+        highlight_rect = pygame.Rect(
+            x + 1,
+            y + 1,
+            highlight_width,
+            highlight_height
+        )
+        highlight_surface = pygame.Surface((highlight_width, highlight_height), pygame.SRCALPHA)
+        highlight_surface.fill(LIGHT_HIGHLIGHT)
+        self.screen.blit(highlight_surface, highlight_rect.topleft)
+
+        # 4. 绘制边框
+        border_rect = pygame.Rect(
+            x,
+            y,
+            block_size - 2,
+            block_size - 2
+        )
+        pygame.draw.rect(self.screen, LIGHT_GRAY, border_rect, 1)
+
+    def draw_next_shape(self):
+        """绘制右侧下一个图形预览"""
+        preview_x = self.grid_width * self.block_size + 20
+        preview_y = 150 if self.difficulty == "简单" else 120
+        preview_bg_width = 100 if self.difficulty == "简单" else 60
+        preview_bg_height = 100 if self.difficulty == "简单" else 60
+
+        # 绘制预览背景
+        bg_rect = pygame.Rect(preview_x, preview_y, preview_bg_width, preview_bg_height)
+        pygame.draw.rect(self.screen, DARK_GRAY, bg_rect)
+        pygame.draw.rect(self.screen, GRAY, bg_rect, 1)
+
+        # 绘制预览提示文字
+        font_size = 22 if self.difficulty == "简单" else 18
+        font = pygame.font.SysFont("SimHei", font_size)
+        next_text = font.render("下一个图形：", True, LIGHT_GRAY)
+        self.screen.blit(next_text, (preview_x, preview_y - 30))
+
+        # 绘制下一个方块
+        if self.next_shape is None:
+            return
+        shape_rows = len(self.next_shape)
+        shape_cols = len(self.next_shape[0])
+        # 居中偏移计算
+        offset_x = (preview_bg_width - shape_cols * self.preview_block_size) // 2
+        offset_y = (preview_bg_height - shape_rows * self.preview_block_size) // 2
+
+        for y, row in enumerate(self.next_shape):
+            for x, cell in enumerate(row):
+                if cell:
+                    block_x = preview_x + offset_x + x * self.preview_block_size
+                    block_y = preview_y + offset_y + y * self.preview_block_size
+                    self.draw_3d_block(block_x, block_y, self.next_color, self.preview_block_size)
+
+    def draw_game_over_ui(self):
+        """绘制游戏结束界面"""
+        # 半透明遮罩
+        mask_surface = pygame.Surface((self.window_width, self.window_height), pygame.SRCALPHA)
+        mask_surface.fill((0, 0, 0, 160))
+        self.screen.blit(mask_surface, (0, 0))
+
+        # 游戏结束标题
+        font_size = 70 if self.difficulty == "简单" else 60
+        game_over_font = pygame.font.SysFont("SimHei", font_size)
+        game_over_text = game_over_font.render("游戏结束", True, RED)
+        text_rect = game_over_text.get_rect(center=(self.window_width // 2, self.window_height // 2 - 60))
+        self.screen.blit(game_over_text, text_rect)
+
+        # 最终分数和等级
+        score_font_size = 45 if self.difficulty == "简单" else 36
+        score_font = pygame.font.SysFont("SimHei", score_font_size)
+        final_score_text = score_font.render(f"最终分数：{self.score}", True, YELLOW)
+        final_level_text = score_font.render(f"最终等级：{self.level}/{MAX_LEVEL}", True, CYAN)
+        score_rect = final_score_text.get_rect(center=(self.window_width // 2, self.window_height // 2 + 10))
+        level_rect = final_level_text.get_rect(center=(self.window_width // 2, self.window_height // 2 + 60))
+        self.screen.blit(final_score_text, score_rect)
+        self.screen.blit(final_level_text, level_rect)
+
+        # 操作提示
+        hint_font_size = 28 if self.difficulty == "简单" else 24
+        hint_font = pygame.font.SysFont("SimHei", hint_font_size)
+        restart_hint = hint_font.render("R键 - 重新开始", True, LIGHT_GRAY)
+        menu_hint = hint_font.render("Esc键 - 返回菜单", True, LIGHT_GRAY)
+        restart_rect = restart_hint.get_rect(center=(self.window_width // 2, self.window_height // 2 + 120))
+        menu_rect = menu_hint.get_rect(center=(self.window_width // 2, self.window_height // 2 + 170))
+        self.screen.blit(restart_hint, restart_rect)
+        self.screen.blit(menu_hint, menu_rect)
+
+    def handle_hold_movement(self):
+        """处理长按平移和长按下键加速"""
+        if not self.game_updating or self.game_paused or self.game_over:
+            # 重置长按状态
+            self.left_held = False
+            self.right_held = False
+            self.down_held = False
+            self.left_hold_timer = 0
+            self.right_hold_timer = 0
+            self.down_hold_timer = 0
+            return
+
+        # 左键长按
+        if self.left_held:
+            self.left_hold_timer += 1
+            if self.left_hold_timer > HOLD_MOVE_DELAY and self.left_hold_timer % HOLD_MOVE_INTERVAL == 0:
+                if not self.check_collision(-1, 0):
+                    self.current_x -= 1
+        else:
+            self.left_hold_timer = 0
+
+        # 右键长按
+        if self.right_held:
+            self.right_hold_timer += 1
+            if self.right_hold_timer > HOLD_MOVE_DELAY and self.right_hold_timer % HOLD_MOVE_INTERVAL == 0:
+                if not self.check_collision(1, 0):
+                    self.current_x += 1
+        else:
+            self.right_hold_timer = 0
+
+        # 下键长按加速
+        if self.down_held:
+            self.down_hold_timer += 1
+            if self.down_hold_timer % DOWN_HOLD_INTERVAL == 0:
+                if not self.check_collision(0, 1):
+                    self.current_y += 1
+                else:
+                    self.lock_shape()
+        else:
+            self.down_hold_timer = 0
+
+    def handle_input(self):
+        """处理按键输入（无硬降落功能）"""
+        # 更新冷却计数器
+        if self.rotate_cooldown_counter > 0:
+            self.rotate_cooldown_counter -= 1
+        if self.left_cooldown_counter > 0:
+            self.left_cooldown_counter -= 1
+        if self.right_cooldown_counter > 0:
+            self.right_cooldown_counter -= 1
+        if self.down_cooldown_counter > 0:
+            self.down_cooldown_counter -= 1
+
+        # 游戏结束状态
+        if self.game_over:
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    self.game_loop_running = False
+                if event.type == pygame.KEYDOWN:
+                    if event.key == pygame.K_r:
+                        self.__init__(self.difficulty)
+                    if event.key == pygame.K_ESCAPE:
+                        self.game_loop_running = False
+            return
+
+        # 暂停状态
+        if self.game_paused:
+            self.left_held = False
+            self.right_held = False
+            self.down_held = False
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    self.game_loop_running = False
+                if event.type == pygame.KEYDOWN:
+                    if event.key == pygame.K_p:
+                        self.game_paused = not self.game_paused
+                        self.game_updating = not self.game_paused
+                    if event.key == pygame.K_r:
+                        self.__init__(self.difficulty)
+                    if event.key == pygame.K_ESCAPE:
+                        self.game_loop_running = False
+            return
+
+        # 正常游戏状态
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                self.game_loop_running = False
+            # 按键按下
+            if event.type == pygame.KEYDOWN:
+                # 暂停/继续
+                if event.key == pygame.K_p:
+                    self.game_paused = not self.game_paused
+                    self.game_updating = not self.game_paused
+                # 重新开始
+                if event.key == pygame.K_r:
+                    self.__init__(self.difficulty)
+                # 退出菜单
+                if event.key == pygame.K_ESCAPE:
+                    self.game_loop_running = False
+                # 左键单击
+                if event.key == pygame.K_LEFT and self.left_cooldown_counter == 0:
+                    if not self.check_collision(-1, 0):
+                        self.current_x -= 1
+                    self.left_cooldown_counter = MOVE_CLICK_COOLDOWN
+                    self.left_held = True
+                # 右键单击
+                if event.key == pygame.K_RIGHT and self.right_cooldown_counter == 0:
+                    if not self.check_collision(1, 0):
+                        self.current_x += 1
+                    self.right_cooldown_counter = MOVE_CLICK_COOLDOWN
+                    self.right_held = True
+                # 上键旋转
+                if event.key == pygame.K_UP and self.rotate_cooldown_counter == 0:
+                    self.rotate_shape()
+                    self.rotate_cooldown_counter = ROTATE_COOLDOWN
+                # 下键单击
+                if event.key == pygame.K_DOWN and self.down_cooldown_counter == 0:
+                    if not self.check_collision(0, 1):
+                        self.current_y += 1
+                    else:
+                        self.lock_shape()
+                    self.down_cooldown_counter = MOVE_CLICK_COOLDOWN
+                    self.down_held = True
+            # 按键松开
+            if event.type == pygame.KEYUP:
+                if event.key == pygame.K_LEFT:
+                    self.left_held = False
+                if event.key == pygame.K_RIGHT:
+                    self.right_held = False
+                if event.key == pygame.K_DOWN:
+                    self.down_held = False
+
+        # 处理长按逻辑
+        self.handle_hold_movement()
+
+    def update_game(self):
+        """更新游戏逻辑（正常下落）"""
+        if not self.game_updating:
+            return
+
+        self.drop_timer += 1
+        if self.drop_timer >= self.drop_interval:
+            if not self.check_collision(0, 1):
+                self.current_y += 1
+            else:
+                self.lock_shape()
+            self.drop_timer = 0
+
+    def draw_game(self):
+        """绘制游戏界面（右侧仅分数、等级、下一个图形）"""
+        self.screen.fill(BLACK)
+
+        # 绘制网格
+        # 横向网格线
+        for y in range(self.grid_height + 1):
+            line_y = y * self.block_size
+            pygame.draw.line(self.screen, GRAY, (0, line_y), (self.grid_width * self.block_size, line_y), 1)
+        # 纵向网格线
+        for x in range(self.grid_width + 1):
+            line_x = x * self.block_size
+            pygame.draw.line(self.screen, GRAY, (line_x, 0), (line_x, self.grid_height * self.block_size), 1)
+
+        # 绘制已有方块
+        for y in range(self.grid_height):
+            for x in range(self.grid_width):
+                cell = self.grid[y][x]
+                if cell != 0:
+                    block_x = x * self.block_size
+                    block_y = y * self.block_size
+                    block_color = SHAPE_COLORS[cell - 1]
+                    self.draw_3d_block(block_x, block_y, block_color, self.block_size)
+
+        # 绘制当前方块
+        if self.current_shape is not None:
+            for y, row in enumerate(self.current_shape):
+                for x, cell in enumerate(row):
+                    if cell:
+                        block_x = (self.current_x + x) * self.block_size
+                        block_y = (self.current_y + y) * self.block_size
+                        self.draw_3d_block(block_x, block_y, self.current_color, self.block_size)
+
+        # 绘制右侧信息
+        font_size = 24 if self.difficulty == "简单" else 20
+        font = pygame.font.SysFont("SimHei", font_size)
+        side_x = self.grid_width * self.block_size + 20
+        # 分数
+        score_text = font.render(f"分数：{self.score}", True, YELLOW)
+        self.screen.blit(score_text, (side_x, 30))
+        # 等级
+        level_text = font.render(f"等级：{self.level}/{MAX_LEVEL}", True, CYAN)
+        self.screen.blit(level_text, (side_x, 80))
+
+        # 绘制下一个图形
+        self.draw_next_shape()
+
+        # 游戏结束UI
+        if self.game_over:
+            self.draw_game_over_ui()
+
+        # 暂停提示
+        if self.game_paused:
+            pause_font_size = 45 if self.difficulty == "简单" else 40
+            pause_font = pygame.font.SysFont("SimHei", pause_font_size)
+            pause_text = pause_font.render("已暂停", True, YELLOW)
+            text_rect = pause_text.get_rect(center=(self.window_width//2, self.window_height//2))
+            self.screen.blit(pause_text, text_rect)
+
+        pygame.display.flip()
+
+    def run(self):
+        """游戏主循环"""
+        clock = pygame.time.Clock()
+        while self.game_loop_running:
+            self.handle_input()
+            self.update_game()
+            self.draw_game()
+            clock.tick(60)
+
+# -------------------------- 菜单界面（精简玩法说明） --------------------------
+def draw_menu():
+    """绘制主菜单界面"""
+    pygame.init()
+    screen = pygame.display.set_mode((500, 600))
+    pygame.display.set_caption("俄罗斯方块 - 主菜单")
+    font_large = pygame.font.SysFont("SimHei", 40)
+    font_normal = pygame.font.SysFont("SimHei", 28)
+    font_small = pygame.font.SysFont("SimHei", 18)
+    font_tiny = pygame.font.SysFont("SimHei", 16)
+
+    menu_options = ["简单", "普通", "困难"]
+    selected_idx = 0
+
+    # 精简玩法说明（同步更新倍速规则）
+    game_rules = [
+        "【玩法说明】",
+        "1.  方向键左右移动（支持长按）",
+        "2.  上键旋转，下键加速下落（支持长按）",
+        "3.  消除1行得20分，每100分升1级（共10级）",
+        "4.  等级对应倍速（1级1倍速，10级10倍速）",
+        "5.  P键暂停/继续，R键重开，Esc键退出"
+    ]
+
+    running = True
+    while running:
+        screen.fill(BLACK)
+
+        # 标题
+        title = font_large.render("俄罗斯方块", True, WHITE)
+        title_rect = title.get_rect(center=(250, 50))
+        screen.blit(title, title_rect)
+
+        # 玩法说明
+        rule_y_start = 100
+        # 玩法标题
+        rule_title = font_normal.render(game_rules[0], True, CYAN)
+        rule_title_rect = rule_title.get_rect(center=(250, rule_y_start))
+        screen.blit(rule_title, rule_title_rect)
+        # 玩法详情
+        for i in range(1, len(game_rules)):
+            rule_text = font_tiny.render(game_rules[i], True, LIGHT_GRAY)
+            rule_rect = rule_text.get_rect(center=(250, rule_y_start + 30 * i))
+            screen.blit(rule_text, rule_rect)
+
+        # 难度选择
+        difficulty_title = font_normal.render("选择难度", True, YELLOW)
+        difficulty_rect = difficulty_title.get_rect(center=(250, 300))
+        screen.blit(difficulty_title, difficulty_rect)
+
+        # 难度选项
+        for idx, option in enumerate(menu_options):
+            color = ORANGE if idx == selected_idx else WHITE
+            text = font_normal.render(option, True, color)
+            text_rect = text.get_rect(center=(250, 350 + idx * 50))
+            screen.blit(text, text_rect)
+
+            # 网格尺寸提示
+            w, h = DIFFICULTY[option]
+            size_text = font_small.render(f"网格尺寸: {w}×{h}", True, GRAY)
+            size_rect = size_text.get_rect(center=(250, 380 + idx * 50))
+            screen.blit(size_text, size_rect)
+
+        # 底部提示
+        hint = font_small.render("鼠标点击/方向键选择 | 回车键确认 | Esc键退出", True, GRAY)
+        hint_rect = hint.get_rect(center=(250, 580))
+        screen.blit(hint, hint_rect)
+
+        pygame.display.flip()
+
+        # 事件处理
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                pygame.quit()
+                sys.exit()
+            if event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_ESCAPE:
+                    if show_quit_confirm(screen):
+                        pygame.quit()
+                        sys.exit()
+                # 方向键选择
+                if event.key == pygame.K_UP:
+                    selected_idx = (selected_idx - 1) % len(menu_options)
+                if event.key == pygame.K_DOWN:
+                    selected_idx = (selected_idx + 1) % len(menu_options)
+                # 回车键确认
+                if event.key == pygame.K_RETURN:
+                    return menu_options[selected_idx]
+            if event.type == pygame.MOUSEBUTTONDOWN:
+                if event.button == 1:
+                    mouse_x, mouse_y = event.pos
+                    for idx, option in enumerate(menu_options):
+                        text_rect = font_normal.render(option, True, WHITE).get_rect(center=(250, 350 + idx * 50))
+                        if text_rect.collidepoint(mouse_x, mouse_y):
+                            return menu_options[idx]
+
+def show_quit_confirm(screen):
+    """退出确认框"""
+    font_normal = pygame.font.SysFont("SimHei", 25)
+    font_btn = pygame.font.SysFont("SimHei", 20)
+
+    confirm_rect = pygame.Rect(150, 250, 200, 150)
+    pygame.draw.rect(screen, GRAY, confirm_rect)
+    pygame.draw.rect(screen, WHITE, confirm_rect, 2)
+
+    # 提示文字
+    text = font_normal.render("是否退出游戏？", True, WHITE)
+    text_rect = text.get_rect(center=(250, 290))
+    screen.blit(text, text_rect)
+
+    # 按钮
+    yes_rect = pygame.Rect(170, 330, 60, 40)
+    no_rect = pygame.Rect(270, 330, 60, 40)
+    pygame.draw.rect(screen, GREEN, yes_rect)
+    pygame.draw.rect(screen, RED, no_rect)
+    yes_text = font_btn.render("是", True, BLACK)
+    no_text = font_btn.render("否", True, WHITE)
+    screen.blit(yes_text, yes_text.get_rect(center=yes_rect.center))
+    screen.blit(no_text, no_text.get_rect(center=no_rect.center))
+
+    pygame.display.flip()
+
+    # 等待点击
+    while True:
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                return True
+            if event.type == pygame.MOUSEBUTTONDOWN:
+                if event.button == 1:
+                    mx, my = event.pos
+                    if yes_rect.collidepoint(mx, my):
+                        return True
+                    if no_rect.collidepoint(mx, my):
+                        return False
+
+# -------------------------- 程序入口 --------------------------
+if __name__ == "__main__":
+    pygame.init()
+    pygame.font.init()
+
+    while True:
+        selected_difficulty = draw_menu()
+        game = TetrisGame(selected_difficulty)
+        game.run()
+        continue
